@@ -181,55 +181,83 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 	}
 
 	// 各投稿のコメント数を取得する
-	commentCounts := make(map[int]int)
-	err := db.Select(&commentCounts, "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDs)
+	query, args, err := sqlx.In("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDs)
 	if err != nil {
 		return nil, err
+	}
+	type CommentCount struct {
+		PostID int `db:"post_id"`
+		Count  int `db:"count"`
+	}
+	var commentCounts []CommentCount
+	err = db.Select(&commentCounts, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	commentCountMap := make(map[int]int)
+	for _, cc := range commentCounts {
+		commentCountMap[cc.PostID] = cc.Count
 	}
 
 	// 各投稿のコメントを取得する
-	comments := make(map[int][]Comment)
-	query := "SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC"
+	query = "SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC"
 	if !allComments {
 		query += " LIMIT 3"
 	}
-	err = db.Select(&comments, query, postIDs)
+	query, args, err = sqlx.In(query, postIDs)
 	if err != nil {
 		return nil, err
+	}
+	var comments []Comment
+	err = db.Select(&comments, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	commentMap := make(map[int][]Comment)
+	for _, c := range comments {
+		commentMap[c.PostID] = append(commentMap[c.PostID], c)
 	}
 
 	// 各コメントのユーザーを取得する
-	userIDs := make([]int, 0)
-	for _, c := range comments {
-		for _, comment := range c {
-			userIDs = append(userIDs, comment.UserID)
+	userIDSet := make(map[int]struct{})
+	for _, cs := range commentMap {
+		for _, c := range cs {
+			userIDSet[c.UserID] = struct{}{}
 		}
 	}
-	users := make(map[int]User)
-	err = db.Select(&users, "SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+	var userIDs []int
+	for uid := range userIDSet {
+		userIDs = append(userIDs, uid)
+	}
+	query, args, err = sqlx.In("SELECT * FROM `users` WHERE `id` IN (?) AND `del_flg` = 0", userIDs)
 	if err != nil {
 		return nil, err
+	}
+	var users []User
+	err = db.Select(&users, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	userMap := make(map[int]User)
+	for _, u := range users {
+		userMap[u.ID] = u
 	}
 
 	// 各投稿にコメントとユーザーを割り当てる
 	for _, p := range results {
-		p.CommentCount = commentCounts[p.ID]
-		p.Comments = comments[p.ID]
-
-		for j := 0; j < len(p.Comments); j++ {
-			p.Comments[j].User = users[p.Comments[j].UserID]
+		user, ok := userMap[p.UserID]
+		if !ok {
+			continue // 削除フラグが立っているユーザーの投稿を除外
 		}
-
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
+		p.User = user
+		p.CommentCount = commentCountMap[p.ID]
+		p.Comments = commentMap[p.ID]
+		for i := range p.Comments {
+			p.Comments[i].User = userMap[p.Comments[i].UserID]
 		}
-
 		p.CSRFToken = csrfToken
 
-		if p.User.DelFlg == 0 {
-			posts = append(posts, p)
-		}
+		posts = append(posts, p)
 		if len(posts) >= postsPerPage {
 			break
 		}
