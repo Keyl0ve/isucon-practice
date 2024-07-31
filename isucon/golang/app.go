@@ -174,35 +174,51 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
+	// 投稿のIDを収集する
+	postIDs := make([]int, len(results))
+	for i, p := range results {
+		postIDs[i] = p.ID
+	}
+
+	// 各投稿のコメント数を取得する
+	commentCounts := make(map[int]int)
+	err := db.Select(&commentCounts, "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 各投稿のコメントを取得する
+	comments := make(map[int][]Comment)
+	query := "SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC"
+	if !allComments {
+		query += " LIMIT 3"
+	}
+	err = db.Select(&comments, query, postIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 各コメントのユーザーを取得する
+	userIDs := make([]int, 0)
+	for _, c := range comments {
+		for _, comment := range c {
+			userIDs = append(userIDs, comment.UserID)
+		}
+	}
+	users := make(map[int]User)
+	err = db.Select(&users, "SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 各投稿にコメントとユーザーを割り当てる
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
-		}
+		p.CommentCount = commentCounts[p.ID]
+		p.Comments = comments[p.ID]
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
+		for j := 0; j < len(p.Comments); j++ {
+			p.Comments[j].User = users[p.Comments[j].UserID]
 		}
-		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		for i := 0; i < len(comments); i++ {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
-
-		p.Comments = comments
 
 		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
 		if err != nil {
